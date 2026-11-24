@@ -444,45 +444,77 @@ func _admob_load_rewarded() -> void :
 
 
 func _admob_show(kind: String, finish: Callable) -> void :
-	var rewarded: = kind == "rewarded"
-	var ad = _rv_ad if rewarded else _iv_ad
-	if ad == null:
-		if rewarded: _admob_load_rewarded()
-		else: _admob_load_interstitial()
+	if kind == "rewarded": _admob_show_rewarded(finish)
+	else: _admob_show_interstitial(finish)
+
+
+func _admob_after(rewarded: bool, was_paused: bool) -> void :
+	get_tree().paused = was_paused
+	if rewarded: _admob_load_rewarded()
+	else: _admob_load_interstitial()
+
+
+func _admob_show_interstitial(finish: Callable) -> void :
+	var iv: InterstitialAd = _iv_ad
+	if iv == null:
+		_admob_load_interstitial()
 		finish.call(false)
 		return
-	if rewarded: _rv_ad = null
-	else: _iv_ad = null
+	_iv_ad = null
+	var token: = Time.get_ticks_msec()
+	_admob_token = token
+	var was_paused: = get_tree().paused
+	var done: = [false]
+	var end: = func():
+		if done[0]: return
+		done[0] = true
+		iv.destroy()
+		_admob_after(false, was_paused)
+		finish.call(true)
 
+	var content: = FullScreenContentCallback.new()
+	content.on_ad_showed_full_screen_content = func(): get_tree().paused = true
+	content.on_ad_dismissed_full_screen_content = func(): end.call()
+	content.on_ad_failed_to_show_full_screen_content = func(err: AdError):
+		print("[Ads] interstitial show failed: ", err.message)
+		end.call()
+	iv.full_screen_content_callback = content
+
+	var on_timeout: = func(): if _admob_token == token: end.call()
+	get_tree().create_timer(ADMOB_SHOW_TIMEOUT, true, false, true).timeout.connect(on_timeout)
+	iv.show()
+
+
+func _admob_show_rewarded(finish: Callable) -> void :
+	var rv: RewardedAd = _rv_ad
+	if rv == null:
+		_admob_load_rewarded()
+		finish.call(false)
+		return
+	_rv_ad = null
 	var token: = Time.get_ticks_msec()
 	_admob_token = token
 	var was_paused: = get_tree().paused
 	var earned: = [false]
 	var done: = [false]
-	var end: = func(ok: bool):
+	var end: = func():
 		if done[0]: return
 		done[0] = true
-		get_tree().paused = was_paused
-		ad.destroy()
-		if rewarded: _admob_load_rewarded()
-		else: _admob_load_interstitial()
-		finish.call(ok)
+		rv.destroy()
+		_admob_after(true, was_paused)
+		finish.call(earned[0])
 
 	var content: = FullScreenContentCallback.new()
 	content.on_ad_showed_full_screen_content = func(): get_tree().paused = true
-	content.on_ad_dismissed_full_screen_content = func(): end.call(earned[0] if rewarded else true)
+	content.on_ad_dismissed_full_screen_content = func(): end.call()
 	content.on_ad_failed_to_show_full_screen_content = func(err: AdError):
-		print("[Ads] show failed: ", err.message)
-		end.call(false)
-	ad.full_screen_content_callback = content
+		print("[Ads] rewarded show failed: ", err.message)
+		end.call()
+	rv.full_screen_content_callback = content
 
-	# Safety net: never leave the game stuck behind a lost callback.
-	var on_timeout: = func(): if _admob_token == token: end.call(earned[0] if rewarded else true)
+	var on_timeout: = func(): if _admob_token == token: end.call()
 	get_tree().create_timer(ADMOB_SHOW_TIMEOUT, true, false, true).timeout.connect(on_timeout)
 
-	if rewarded:
-		var listener: = OnUserEarnedRewardListener.new()
-		listener.on_user_earned_reward = func(_item: RewardedItem): earned[0] = true
-		ad.show(listener)
-	else:
-		ad.show()
+	var listener: = OnUserEarnedRewardListener.new()
+	listener.on_user_earned_reward = func(_item: RewardedItem): earned[0] = true
+	rv.show(listener)
