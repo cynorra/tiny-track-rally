@@ -73,8 +73,11 @@ jobs:
         run: |
           mkdir -p build
           godot --headless --export-release "Android" build/tiny-track-rally.aab
+          godot --headless --export-release "Android APK" build/tiny-track-rally.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tiny-track-rally-aab
-          path: build/*.aab
+          name: tiny-track-rally
+          path: |
+            build/*.aab
+            build/*.apk
