@@ -25,6 +25,14 @@ boot_splash/bg_color=Color(0.094, 0.125, 0.25, 1)
 boot_splash/image="res://splash-screen.png"
 config/icon="res://icon.png"
 
+[admob]
+
+general/android/app_id="ca-app-pub-4674211063760769~5041164876"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/admob/plugin.cfg")
+
 [autoload]
 
 Game="*res://scripts/game.gd"

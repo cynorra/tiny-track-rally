@@ -26,8 +26,8 @@ extends Node
 signal ad_started
 signal ad_finished
 
-const ADMOB_INTERSTITIAL_ID: = "ca-app-pub-3940256099942544/1033173712"
-const ADMOB_REWARDED_ID: = "ca-app-pub-3940256099942544/5224354917"
+const ADMOB_INTERSTITIAL_ID: = "ca-app-pub-4674211063760769/7938790950"
+const ADMOB_REWARDED_ID: = "ca-app-pub-4674211063760769/1684373795"
 const MIN_SECONDS_BETWEEN_INTERSTITIALS: = 90.0
 
 var provider: = "stub"
@@ -72,6 +72,7 @@ func _ready() -> void :
 	elif OS.has_feature("android") or OS.has_feature("ios"):
 		provider = "none"
 	print("[Ads] provider = ", provider)
+	if provider == "admob": _admob_init()
 
 
 func sdk_available() -> bool:
@@ -83,6 +84,7 @@ func sdk_available() -> bool:
 
 func rewarded_ready() -> bool:
 	match provider:
+		"admob": return _rv_ad != null
 		"gd":
 			if bool(JavaScriptBridge.eval("!!(window.__ttrSdk && window.__ttrSdk.rewardedReady)", true)): return true
 			JavaScriptBridge.eval("window.__ttrPreloadRewarded && window.__ttrPreloadRewarded()", true)
@@ -212,8 +214,7 @@ func _show(kind: String, done: Callable) -> void :
 		"gd", "gpx":
 			_gd_show(kind, finish)
 		"admob":
-
-			finish.call(true)
+			_admob_show(kind, finish)
 		_:
 			_stub_overlay(kind, finish)
 
@@ -362,3 +363,126 @@ func _stub_overlay(kind: String, finish: Callable) -> void :
 	await get_tree().create_timer(1.2, true, false, true).timeout
 	layer.queue_free()
 	finish.call(true)
+
+
+# ---------------------------------------------------------------------------
+# AdMob (Android) via the Poing AdMob plugin: UMP consent, init, preload, show.
+# ---------------------------------------------------------------------------
+const ADMOB_SHOW_TIMEOUT: = 120.0
+
+var _admob_ready: = false
+var _admob_initializing: = false
+var _iv_ad: InterstitialAd = null
+var _rv_ad: RewardedAd = null
+var _iv_loading: = false
+var _rv_loading: = false
+var _admob_token: = 0
+
+
+func _admob_init() -> void :
+	if _admob_ready or _admob_initializing: return
+	_admob_initializing = true
+	var params: = ConsentRequestParameters.new()
+	params.tag_for_under_age_of_consent = false
+	UserMessagingPlatform.consent_information.update(params, _on_consent_updated, _on_consent_error)
+
+
+func _on_consent_updated() -> void :
+	var info = UserMessagingPlatform.consent_information
+	if info.get_consent_status() == ConsentInformation.ConsentStatus.REQUIRED and info.get_is_consent_form_available():
+		UserMessagingPlatform.load_consent_form(_on_consent_form_loaded, _on_consent_error)
+	else:
+		_admob_start()
+
+
+func _on_consent_form_loaded(form: ConsentForm) -> void :
+	form.show(_on_consent_form_closed)
+
+
+func _on_consent_form_closed(_err: FormError) -> void :
+	_admob_start()
+
+
+func _on_consent_error(_err: FormError) -> void :
+	_admob_start()
+
+
+func _admob_start() -> void :
+	if _admob_ready: return
+	_admob_ready = true
+	MobileAds.initialize()
+	_admob_load_interstitial()
+	_admob_load_rewarded()
+
+
+func _admob_load_interstitial() -> void :
+	if _iv_ad != null or _iv_loading or not _admob_ready: return
+	_iv_loading = true
+	var cb: = InterstitialAdLoadCallback.new()
+	cb.on_ad_loaded = func(ad: InterstitialAd):
+		_iv_loading = false
+		_iv_ad = ad
+	cb.on_ad_failed_to_load = func(err: LoadAdError):
+		_iv_loading = false
+		print("[Ads] interstitial load failed: ", err.message)
+		get_tree().create_timer(45.0, true, false, true).timeout.connect(_admob_load_interstitial)
+	InterstitialAdLoader.new().load(ADMOB_INTERSTITIAL_ID, AdRequest.new(), cb)
+
+
+func _admob_load_rewarded() -> void :
+	if _rv_ad != null or _rv_loading or not _admob_ready: return
+	_rv_loading = true
+	var cb: = RewardedAdLoadCallback.new()
+	cb.on_ad_loaded = func(ad: RewardedAd):
+		_rv_loading = false
+		_rv_ad = ad
+	cb.on_ad_failed_to_load = func(err: LoadAdError):
+		_rv_loading = false
+		print("[Ads] rewarded load failed: ", err.message)
+		get_tree().create_timer(45.0, true, false, true).timeout.connect(_admob_load_rewarded)
+	RewardedAdLoader.new().load(ADMOB_REWARDED_ID, AdRequest.new(), cb)
+
+
+func _admob_show(kind: String, finish: Callable) -> void :
+	var rewarded: = kind == "rewarded"
+	var ad = _rv_ad if rewarded else _iv_ad
+	if ad == null:
+		if rewarded: _admob_load_rewarded()
+		else: _admob_load_interstitial()
+		finish.call(false)
+		return
+	if rewarded: _rv_ad = null
+	else: _iv_ad = null
+
+	var token: = Time.get_ticks_msec()
+	_admob_token = token
+	var was_paused: = get_tree().paused
+	var earned: = [false]
+	var done: = [false]
+	var end: = func(ok: bool):
+		if done[0]: return
+		done[0] = true
+		get_tree().paused = was_paused
+		ad.destroy()
+		if rewarded: _admob_load_rewarded()
+		else: _admob_load_interstitial()
+		finish.call(ok)
+
+	var content: = FullScreenContentCallback.new()
+	content.on_ad_showed_full_screen_content = func(): get_tree().paused = true
+	content.on_ad_dismissed_full_screen_content = func(): end.call(earned[0] if rewarded else true)
+	content.on_ad_failed_to_show_full_screen_content = func(err: AdError):
+		print("[Ads] show failed: ", err.message)
+		end.call(false)
+	ad.full_screen_content_callback = content
+
+	# Safety net: never leave the game stuck behind a lost callback.
+	var on_timeout: = func(): if _admob_token == token: end.call(earned[0] if rewarded else true)
+	get_tree().create_timer(ADMOB_SHOW_TIMEOUT, true, false, true).timeout.connect(on_timeout)
+
+	if rewarded:
+		var listener: = OnUserEarnedRewardListener.new()
+		listener.on_user_earned_reward = func(_item: RewardedItem): earned[0] = true
+		ad.show(listener)
+	else:
+		ad.show()
